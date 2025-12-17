@@ -410,6 +410,16 @@ cmd_string(int cmd)
 		case cmd_ToggleHideHeaderLine:
 			return "ToggleHideHeaderLine";
 
+		case cmd_ToggleEditMode:
+			return "ToggleEditMode";
+		case cmd_SaveChanges:
+			return "SaveChanges";
+		case cmd_EditCell:
+			return "EditCell";
+
+		case cmd_UndoLastChange:
+			return "UndoLastChange";
+
 		default:
 			return "unknown command";
 	}
@@ -597,6 +607,14 @@ translate_event(int c, bool alt, Options *opts, int *nested_command)
 			case 1:		/* CTRL A */
 			case '%':
 				return cmd_MarkAll;
+
+			case 'E':
+				return cmd_ToggleEditMode;
+			case 'S':
+				return cmd_SaveChanges;
+
+			case 'U':
+				return cmd_UndoLastChange;
 
 			case KEY_SR:
 				*nested_command = cmd_CursorUp;

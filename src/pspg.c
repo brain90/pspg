@@ -191,6 +191,10 @@ static MarkModeType	mark_mode = MARK_MODE_NONE;
 static int		mark_mode_start_row = 0;
 static int		mark_mode_start_col = 0;
 
+static bool	edit_mode = false;
+
+static ChangedCell *changed_cells = NULL;
+
 static bool	recheck_vertical_cursor_visibility = false;
 
 #ifdef COMPILE_MENU
@@ -316,6 +320,146 @@ trim_to_range(int v, int a, int b)
 		return b;
 
 	return v;
+}
+
+static char *
+escape_sql_string(const char *str)
+{
+	size_t len = strlen(str);
+	char *escaped = malloc(len * 2 + 3); // worst case
+	if (!escaped) return NULL;
+	char *p = escaped;
+	*p++ = '\'';
+	for (const char *s = str; *s; s++)
+	{
+		if (*s == '\'')
+			*p++ = '\'';
+		*p++ = *s;
+	}
+	*p++ = '\'';
+	*p = '\0';
+	return escaped;
+}
+
+static void
+add_changed_cell(int row, int col, const char *original_value, const char *new_value)
+{
+	ChangedCell *cc = malloc(sizeof(ChangedCell));
+
+	if (!cc) return;
+
+	cc->row = row;
+	cc->col = col;
+	cc->original_value = strdup(original_value ? original_value : "");
+	cc->new_value = strdup(new_value ? new_value : "");
+	cc->next = changed_cells;
+	changed_cells = cc;
+}
+
+static char *
+get_cell_value(DataDesc *desc, int row, int col)
+{
+	LineBufferIter lbi;
+	char *rowstr = NULL;
+	int r = 0;
+
+	init_lbi_ddesc(&lbi, desc, 0);
+
+	while (r <= row)
+	{
+		lbi_get_line_next(&lbi, &rowstr, NULL, NULL);
+		r++;
+		if (!rowstr) return NULL;
+	}
+
+	// now rowstr is the line
+	// parse to get col
+	FmtLineIter iter;
+	iter.row = rowstr;
+	iter.headline = desc->headline_transl;
+	iter.xpos = 0;
+
+	char typ;
+	int size, width, xpos;
+	int c = 0;
+
+	while (c <= col)
+	{
+		char *cell = next_char(&iter, &typ, &size, &width, &xpos);
+		if (!cell) return NULL;
+		if (c == col)
+		{
+			// copy the cell
+			char *val = malloc(size + 1);
+			strncpy(val, cell, size);
+			val[size] = '\0';
+			return val;
+		}
+		c++;
+	}
+	return NULL;
+}
+
+typedef struct
+{
+	char	   *row;
+	char	   *headline;
+	int			xpos;
+} FmtLineIter;
+
+static char *
+next_char(FmtLineIter *iter,
+		  char *typ,
+		  int *size,
+		  int *width,
+		  int *xpos)
+{
+	char   *result = iter->row;
+
+	if (!iter->row || !iter->headline)
+		return NULL;
+
+	if (*iter->row == '\0' || *iter->headline == '\n')
+		return NULL;
+
+	*typ = *(iter->headline);
+	*xpos = iter->xpos;
+
+	*size = charlen(result);
+	*width = dsplen(result);
+
+	iter->row += *size;
+	iter->headline += *width;
+	iter->xpos += *width;
+
+	return result;
+}
+
+static int
+count_changes()
+{
+	int c = 0;
+	for (ChangedCell *cc = changed_cells; cc; cc = cc->next) c++;
+	return c;
+}
+
+static void
+edit_current_cell(Options *opts, ScrDesc *scrdesc, DataDesc *desc, int cursor_row, int cursor_col)
+{
+	char buffer[1024];
+	char prompt[100];
+	char *current_value = get_cell_value(desc, cursor_row, cursor_col);
+
+	if (!current_value) current_value = "";
+
+	snprintf(prompt, sizeof(prompt), "Edit cell (%d,%d): ", cursor_row, cursor_col);
+
+	if (get_string(prompt, buffer, sizeof(buffer) - 1, current_value, 'u'))
+	{
+		add_changed_cell(cursor_row, cursor_col, current_value, buffer);
+	}
+
+	if (current_value) free(current_value);
 }
 
 void
@@ -1486,6 +1630,13 @@ print_status(Options *opts,
 								number_width(desc->last_row), desc->last_row + 1,
 								((cursor_row + 1) / ((double) (desc->last_row + 1))) * 100.0);
 			}
+		}
+
+		if (edit_mode)
+		{
+			char editbuf[20];
+			snprintf(editbuf, sizeof(editbuf), " EDIT(%d)", count_changes());
+			strncat(buffer, editbuf, sizeof(buffer) - strlen(buffer) - 1);
 		}
 
 		mvwprintw(top_bar, 0, maxx - strlen(buffer) - 2, "  %s", buffer);
@@ -3577,6 +3728,13 @@ reinit_theme:
 						event_keycode != KEY_MOUSE)
 					mark_mode = MARK_MODE_NONE;
 
+				if (edit_mode && event_keycode == '\n')
+				{
+					edit_current_cell(&opts, &scrdesc, &desc, cursor_row, cursor_col);
+					refresh_scr = true;
+					continue;
+				}
+
 				if (force_refresh ||
 					opts.watch_time ||
 					((opts.watch_file || state.stream_mode) && (event == PSPG_READ_DATA_EVENT)))
@@ -4470,6 +4628,135 @@ reset_search:
 			case cmd_ToggleHideHeaderLine:
 				opts.hide_header_line = !opts.hide_header_line;
 				refresh_scr = true;
+				break;
+
+			case cmd_ToggleEditMode:
+				edit_mode = !edit_mode;
+				if (!edit_mode)
+				{
+					// clear changes
+					ChangedCell *cc = changed_cells;
+					while (cc)
+					{
+						ChangedCell *next = cc->next;
+						free(cc->original_value);
+						free(cc->new_value);
+						free(cc);
+						cc = next;
+					}
+					changed_cells = NULL;
+				}
+				refresh_scr = true;
+				break;
+
+			case cmd_SaveChanges:
+				if (edit_mode)
+				{
+#ifdef HAVE_POSTGRESQL
+					char table[256];
+					if (!get_string("Table name: ", table, sizeof(table) - 1, NULL, 'u')) return;
+					const char *err = NULL;
+					// Start transaction
+					if (!pg_exec_command(&opts, "BEGIN", &err))
+					{
+						show_info_wait(err ? err : "Failed to start transaction", NULL, false, true, false, true);
+						return;
+					}
+					bool success = true;
+					for (ChangedCell *cc = changed_cells; cc; cc = cc->next)
+					{
+						char *id_val = get_cell_value(desc, cc->row, 0);
+						if (id_val)
+						{
+							char col_name[256];
+							if (desc->columns && cc->col < desc->ncolumns)
+							{
+								char *name = desc->headline + desc->columns[cc->col].name_offset;
+								strncpy(col_name, name, desc->columns[cc->col].name_size);
+								col_name[desc->columns[cc->col].name_size] = '\0';
+							}
+							else
+							{
+								snprintf(col_name, sizeof(col_name), "col%d", cc->col);
+							}
+							char *escaped_new = escape_sql_string(cc->new_value);
+							char *escaped_id = escape_sql_string(id_val);
+							if (escaped_new && escaped_id)
+							{
+								char update[2048];
+								snprintf(update, sizeof(update), "UPDATE %s SET %s = %s WHERE id = %s", table, col_name, escaped_new, escaped_id);
+								free(escaped_new);
+								free(escaped_id);
+								if (!pg_exec_command(&opts, update, &err))
+								{
+									success = false;
+									break;
+								}
+							}
+							else
+							{
+								success = false;
+								err = "Failed to escape values";
+								break;
+							}
+							free(id_val);
+						}
+					}
+					if (success)
+					{
+						if (pg_exec_command(&opts, "COMMIT", &err))
+						{
+							show_info_wait("Changes saved successfully", NULL, false, true, false, false);
+							// Clear changes
+							ChangedCell *cc = changed_cells;
+							while (cc)
+							{
+								ChangedCell *next = cc->next;
+								free(cc->original_value);
+								free(cc->new_value);
+								free(cc);
+								cc = next;
+							}
+							changed_cells = NULL;
+						}
+						else
+						{
+							show_info_wait(err ? err : "Failed to commit", NULL, false, true, false, true);
+							pg_exec_command(&opts, "ROLLBACK", &err);
+						}
+					}
+					else
+					{
+						show_info_wait(err ? err : "Failed to update", NULL, false, true, false, true);
+						pg_exec_command(&opts, "ROLLBACK", &err);
+					}
+#else
+					show_info_wait("Cell editing save requires PostgreSQL support", NULL, false, true, false, false);
+#endif
+				}
+				break;
+
+			case cmd_EditCell:
+				if (edit_mode)
+				{
+					edit_current_cell(&opts, &scrdesc, &desc, cursor_row, cursor_col);
+					refresh_scr = true;
+				}
+				break;
+
+			case cmd_UndoLastChange:
+				if (edit_mode)
+				{
+					if (changed_cells)
+					{
+						ChangedCell *cc = changed_cells;
+						changed_cells = cc->next;
+						free(cc->original_value);
+						free(cc->new_value);
+						free(cc);
+						refresh_scr = true;
+					}
+				}
 				break;
 
 			case cmd_Mark:

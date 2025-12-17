@@ -97,6 +97,18 @@ typedef struct
 } CRange;
 
 /*
+ * Changed cell for editing
+ */
+typedef struct ChangedCell
+{
+	int		row;
+	int		col;
+	char   *original_value;
+	char   *new_value;
+	struct ChangedCell *next;
+} ChangedCell;
+
+/*
  * Available formats of headline chars
  *
  *  L, R   .. outer border
@@ -384,6 +396,7 @@ extern bool read_and_format(Options *opts, DataDesc *desc, StateData *state);
 
 /* from pgclient.c */
 extern bool pg_exec_query(Options *opts, char *query, RowBucketType *rb, PrintDataDesc *pdesc, const char **err);
+extern bool pg_exec_command(Options *opts, char *query, const char **err);
 
 /* from args.c */
 extern char **buildargv(const char *input, int *argc, char *appname);

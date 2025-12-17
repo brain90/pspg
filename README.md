@@ -25,6 +25,19 @@ This pager can be used from the following command line clients, too:
 * mouse is supported and used
 * ability to copy a selected range to the clipboard
 
+## Cell Editing
+
+pspg supports inline cell editing when connected to a PostgreSQL database.
+
+- Press 'E' to toggle edit mode.
+- In edit mode, navigate to a cell and press Enter to edit its value.
+- Press 'U' to undo the last change.
+- Press 'S' to save changes, which executes UPDATE statements on the database.
+- Changes are committed in a transaction; errors are displayed if the update fails.
+- The status bar shows "EDIT(n)" where n is the number of unsaved changes.
+
+Note: This feature requires a connection to the database and assumes the first column is the primary key named 'id'. Table name must be provided when saving.
+
 ## Installation and basic configuration
 
 The `pspg` can be simply installed from Debian (Ubuntu) repositories. RedHat (Fedora) repositories

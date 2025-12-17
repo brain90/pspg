@@ -415,3 +415,70 @@ pg_exec_query(Options *opts, char *query, RowBucketType *rb, PrintDataDesc *pdes
 #endif
 
 }
+
+bool
+pg_exec_command(Options *opts, char *query, const char **err)
+{
+#ifdef HAVE_POSTGRESQL
+
+	PGconn	   *conn = NULL;
+	PGresult   *result = NULL;
+
+	char	   *password;
+
+	const char *keywords[8];
+	const char *values[8];
+
+	if (opts->force_password_prompt && !opts->password)
+	{
+		password = getpass("Password: ");
+		opts->password = strdup(password);
+		if (!opts->password)
+			EXIT_OUT_OF_MEMORY();
+	}
+
+	keywords[0] = "host"; values[0] = opts->host;
+	keywords[1] = "port"; values[1] = opts->port;
+	keywords[2] = "user"; values[2] = opts->user;
+	keywords[3] = "password"; values[3] = opts->password;
+	keywords[4] = "dbname"; values[4] = opts->dbname;
+	keywords[5] = "connect_timeout"; values[5] = "5";
+	keywords[6] = NULL; values[6] = NULL;
+
+	conn = PQconnectdbParams(keywords, values, 0);
+
+	if (PQstatus(conn) != CONNECTION_OK)
+	{
+		PQfinish(conn);
+		*err = PQerrorMessage(conn);
+		return false;
+	}
+
+	result = PQexec(conn, query);
+
+	if (PQresultStatus(result) != PGRES_COMMAND_OK)
+	{
+		*err = PQerrorMessage(conn);
+		PQclear(result);
+		PQfinish(conn);
+		return false;
+	}
+
+	PQclear(result);
+	PQfinish(conn);
+
+	*err = NULL;
+	return true;
+
+#else
+
+	(void) opts;
+	(void) query;
+
+	*err = "Command cannot be executed. The Postgres library was not available at compile time.";
+
+	return false;
+
+#endif
+
+}
